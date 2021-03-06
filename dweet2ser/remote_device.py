@@ -1,12 +1,13 @@
 import datetime
 import threading
 import time
+import concurrent.futures
 
 import requests
 from urllib3.exceptions import ProtocolError
 
 from . import dweepy
-from .utils import internet_connection, print_to_ui
+from .utils import internet_connection, print_to_ui, logger
 
 class DeadConnectionError(Exception):
     pass
@@ -41,9 +42,7 @@ class RemoteDevice(object):
         self._kill_signal = "kill"
         self._message_queue = []
         self._started_on_day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-        self.exc = False
         self.listening = False
-        self.remove_me = False
         self.translation = translation
 
     def write(self, message):
@@ -51,22 +50,20 @@ class RemoteDevice(object):
         Tries to send a dweet message to the remote device. If there's no internet connection it saves
         the message to a queue.
         """
-        if internet_connection() and self._send_dweet({self.write_kw: message}):
+        if internet_connection():
             # check for a connection before trying to send to dweet
-            return True
+            return self._send_dweet({self.write_kw: message})
         else:
-            # if there's no connection save the message to resend on reconnect
-            print_to_ui(f"No connection to {self.name}. Saving message to queue.")
+            logger.warn(f"No connection to {self.name}. Saving message to queue.")
             self._message_queue.append(message)
-            self.exc = True
-            return False
+            raise DeadConnectionError(f"No connection to {self.name}. Saving message to queue.")
 
     def send_message_queue(self):
         """
         Attempt to send queued messages.
         """
-        while len(self._message_queue) > 0 and internet_connection():
-            print_to_ui(f"Sending queued messages.")
+        while len(self._message_queue) > 0:
+            logger.info(f"Sending queued messages.")
             self.write(self._message_queue.pop(0))
             time.sleep(1.2)  # avoid exceeding dweet.io's 1s rate limit
 
@@ -76,25 +73,12 @@ class RemoteDevice(object):
             return True
 
         except dweepy.DweepyError as e:
-            print_to_ui(str(e))
             if str(e) == "Rate limit exceeded, try again in 1 second(s).":
-                print_to_ui(f"Trying again...")
+                logger.warn(f"{e} Trying again...")
                 time.sleep(1.5)
                 return self._send_dweet(content)
             else:
-                return False
-
-        except (ConnectionError, ProtocolError, OSError) as e:
-            print_to_ui(str(e))
-            print_to_ui(f"Connection to {self.name} lost.")
-            self.exc = True
-            return False
-
-        except Exception as e:
-            print_to_ui(f"Unexpected error.")
-            print_to_ui(str(e))
-            self.exc = True
-            return False
+                raise
 
     def restart_session(self):
         """
@@ -110,39 +94,30 @@ class RemoteDevice(object):
         self.listening = True
         # Start a thread to send a message to dweet every 45 seconds.
         # This is necessary because dweet.io closes the listen response after 60s of inactivity.
-        keepalive_thread = threading.Thread(target=self._keepalive)
-        keepalive_thread.daemon = True
-        keepalive_thread.start()
-
-        for message in self._listen_for_dweets():
-            yield message
-
-        self.listening = False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._keepalive)
+            while future.running():
+                for message in self._listen_for_dweets():
+                    yield message
+            self.listening = False
+            raise DeadConnectionError
 
     def _listen_for_dweets(self):
         """ makes a call to dweepy to start a listening stream. error handling needs work
         """
         while internet_connection() and self.listening:
-            try:
-                for dweet in dweepy.listen_for_dweets_from(self.thing_id, key=self.thing_key,
-                                                           timeout=90000, session=self._session):
-                    content = dweet["content"]
-                    self._last_message = dweet
-                    if self.read_kw in content:
-                        message = content[self.read_kw]
-                        if message == self._kill_signal:
-                            print_to_ui(f"Listen stream for {self.name} closed.")
-                            return
-                        yield message
+            for dweet in dweepy.listen_for_dweets_from(self.thing_id, key=self.thing_key,
+                                                        timeout=90000, session=self._session):
+                content = dweet["content"]
+                self._last_message = dweet
+                if self.read_kw in content:
+                    message = content[self.read_kw]
+                    if message == self._kill_signal:
+                        print_to_ui(f"Listen stream for {self.name} closed.")
+                        return
+                    yield message
 
-            # if you get an error because dweet closed the connection, open it again.
-            except (ConnectionError, ProtocolError, OSError) as e:
-                print_to_ui(str(e))
-                print_to_ui(f"Connection closed by dweet, restarting.")
-                self.restart_session()
-                yield self.get_last_message()
-        print_to_ui(f"Listen stream for {self.name} closed.")
-        self.exc = True
+        logger.info(f"Listen stream for {self.name} closed.")
         return
 
     def kill_listen_stream(self):
@@ -156,16 +131,16 @@ class RemoteDevice(object):
         """ dweet.io seems to close the connection after 60 seconds of inactivity.
             This sends a dummy payload every 45s to avoid that.
         """
-        while self.listening and not self.exc:
+        while self.listening:
             no_internet_counter = 0
             for i in range(0, 44):
-                if not self.listening or self.exc:
+                if not self.listening:
                     break
                 time.sleep(1)
                 if not internet_connection():
                     no_internet_counter += 1
                 if no_internet_counter >= 3:
-                    self.exc = True
+                    raise DeadConnectionError(f"Lost connection to {self.name}")
             self._send_dweet({"keepalive": 1})
 
     def get_last_message(self):

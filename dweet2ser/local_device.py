@@ -25,9 +25,7 @@ class LocalDevice(object):
         self._last_message = ''
         self.mute = mute
         self.translation = translation
-        self.exc = False
         self.listening = False
-        self.remove_me = False
 
     def write(self, message: str):
         """
@@ -37,9 +35,9 @@ class LocalDevice(object):
             message = str(message)
         message_bytes = bytes.fromhex(message)  # convert dweet string into bytes for RS232.
         try:
-            self.serial_port.write(message_bytes)
-            
+            self.serial_port.write(message_bytes)  
             return True
+
         except SerialTimeoutException:
             return False
 
@@ -49,18 +47,14 @@ class LocalDevice(object):
         ser = self.serial_port
         self.listening = True
 
-        try:
-            while self.listening:
-                if ser.in_waiting > 0:
-                    ser_data = ser.read(100)
-                    self._last_message = ser_data.hex()
-                    yield ser_data.hex()
-                else:
-                    time.sleep(0.0001)
-            self.serial_port.close()
-        except:
-            print_to_ui(f"{self.name} unplugged.")
-            self.remove_me = True
+        while self.listening:
+            if ser.in_waiting > 0:
+                ser_data = ser.read(100)
+                self._last_message = ser_data.hex()
+                yield ser_data.hex()
+            else:
+                time.sleep(0.0001)
+        self.serial_port.close()
 
         return 
 
@@ -75,3 +69,6 @@ class LocalDevice(object):
         Returns the last message read from the serial port.
         """
         return self._last_message
+
+    def send_message_queue():
+        pass
