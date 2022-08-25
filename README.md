@@ -1,6 +1,8 @@
 # dweet2ser
 A serial <-> dweet.io interface
 
+## NOTE: Development on dweet2ser has stopped in favor of [Ullr](https://github.com/zhenry9/ullr).
+
 <img src="https://github.com/zhenry9/dweet2ser/raw/main/dweet2ser-signal-flow.png" height="300" align="middle">
 
 dweet2ser allows for the two-way exchange of data between serial devices and computers over the internet, 
